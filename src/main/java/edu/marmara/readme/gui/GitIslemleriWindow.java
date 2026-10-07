@@ -1,0 +1,186 @@
+package edu.marmara.readme.gui;
+
+import edu.marmara.readme.engine.ReadmeGenerator;
+import edu.marmara.readme.git.GitHelper;
+import javafx.geometry.Insets;
+import javafx.scene.Scene;
+import javafx.scene.control.*;
+import javafx.scene.layout.HBox;
+import javafx.scene.layout.Priority;
+import javafx.scene.layout.VBox;
+import javafx.stage.Modality;
+import javafx.stage.Stage;
+
+import java.nio.file.Path;
+import java.util.List;
+
+/**
+ * Python git_islemleri_window.py'nin Java/JavaFX portu.
+ *
+ * Kapsam notu: Google Form güncelleme ve rutin kontrol, Marmara için henüz
+ * gerçek bir anket formu oluşturulmadığından (Faz 2 kapsamında) burada devre
+ * dışı — ileride googleform modülü form linkleriyle bağlanınca etkinleştirilecek.
+ */
+public class GitIslemleriWindow {
+
+    private final Path jsonDeposu;
+
+    public GitIslemleriWindow(Path jsonDeposu) {
+        this.jsonDeposu = jsonDeposu;
+    }
+
+    public void show() {
+        Path dokumanlarRepoYolu = AppConfig.dokumanlarRepoYolu();
+
+        Stage stage = new Stage();
+        stage.setTitle("Git İşlemleri");
+        stage.initModality(Modality.APPLICATION_MODAL);
+
+        TextArea cikti = new TextArea();
+        cikti.setEditable(false);
+        cikti.setPrefRowCount(14);
+
+        Button readmeGuncelleBtn = new Button("📝 Readme Güncelle");
+        readmeGuncelleBtn.setOnAction(e -> {
+            cikti.clear();
+            ReadmeGenerator generator = new ReadmeGenerator(jsonDeposu, msg -> cikti.appendText(msg + "\n"));
+            try {
+                generator.generateAll();
+                Toast.show(stage, "README.md dosyaları güncellendi.", Toast.Tip.BASARI);
+            } catch (Exception ex) {
+                Dialogs.error("Hata", "README üretilirken hata oluştu: " + ex.getMessage());
+            }
+        });
+
+        Button cekBtn = new Button("⬇️ Dosya Değişikliklerini GitHub'dan Çek");
+        cekBtn.setOnAction(e -> {
+            List<String> durum = GitHelper.gitStatus(dokumanlarRepoYolu);
+            boolean temiz = durum.stream().allMatch(String::isBlank);
+            if (!temiz) {
+                Dialogs.error("Hata", "Yerel değişiklikler var, önce bunları pushlayın veya geri alın.");
+                return;
+            }
+            cikti.appendText("Fetch/pull deneniyor...\n");
+            var sonuc = runFetchReset(dokumanlarRepoYolu);
+            cikti.appendText(sonuc + "\n");
+        });
+
+        Button pushBtn = new Button("⬆️ Değişiklikleri GitHub'a Pushla");
+        pushBtn.setOnAction(e -> pushDialogAc(dokumanlarRepoYolu));
+
+        Button durumBtn = new Button("📋 Değişiklikleri Göster");
+        durumBtn.setOnAction(e -> {
+            List<String> durum = GitHelper.gitStatus(dokumanlarRepoYolu);
+            cikti.setText(String.join("\n", durum));
+        });
+
+        Button hocaDersAdlariBtn = new Button("👥 Hoca/Ders Adlarını Al");
+        hocaDersAdlariBtn.setOnAction(e -> new HocaDersAdlariWindow(jsonDeposu).show());
+
+        Button formGuncelleBtn = new Button("✍️ Google Form Güncelle (henüz yapılandırılmadı)");
+        formGuncelleBtn.setDisable(true);
+        formGuncelleBtn.setTooltip(new Tooltip("Marmara anketleri henüz oluşturulmadı — Faz 2'de etkinleşecek."));
+
+        Button rutinBtn = new Button("🔁 Rutin Kontrol Başlat (henüz yapılandırılmadı)");
+        rutinBtn.setDisable(true);
+        rutinBtn.setTooltip(new Tooltip("Marmara anketleri henüz oluşturulmadı — Faz 2'de etkinleşecek."));
+
+        VBox root = new VBox(8, formGuncelleBtn, readmeGuncelleBtn, rutinBtn, cekBtn, durumBtn,
+                hocaDersAdlariBtn, pushBtn, new Label("Çıktı:"), cikti);
+        root.setPadding(new Insets(10));
+        stage.setScene(new Scene(root, 640, 600));
+        stage.showAndWait();
+    }
+
+    private String runFetchReset(Path repoPath) {
+        try {
+            Process fetch = new ProcessBuilder("git", "-C", repoPath.toString(), "fetch", "--all").start();
+            fetch.waitFor();
+            Process reset = new ProcessBuilder("git", "-C", repoPath.toString(), "reset", "--hard", "origin/main").start();
+            int exit = reset.waitFor();
+            return exit == 0 ? "Başarıyla güncellendi." : "Hata oluştu (exit=" + exit + ").";
+        } catch (Exception e) {
+            return "Hata: " + e.getMessage();
+        }
+    }
+
+    private record DegisenDosya(String durumKodu, String dosyaAdi) {
+    }
+
+    private void pushDialogAc(Path repoPath) {
+        Stage dlg = new Stage();
+        dlg.initModality(Modality.APPLICATION_MODAL);
+        dlg.setTitle("Değişiklikleri Pushlama");
+
+        List<String> durum = GitHelper.gitStatus(repoPath);
+        ListView<CheckBox> dosyaListView = new ListView<>();
+        for (String satir : durum) {
+            if (satir.isBlank()) {
+                continue;
+            }
+            String kod = satir.length() >= 2 ? satir.substring(0, 2) : "??";
+            String dosyaAdi = satir.length() > 3 ? satir.substring(3) : satir;
+            CheckBox cb = new CheckBox(kod + "  " + dosyaAdi);
+            cb.setSelected(true);
+            cb.setUserData(new DegisenDosya(kod, dosyaAdi));
+            dosyaListView.getItems().add(cb);
+        }
+
+        Button farkiGorBtn = new Button("Farkı Gör");
+        farkiGorBtn.setOnAction(e -> {
+            CheckBox secili = dosyaListView.getSelectionModel().getSelectedItem();
+            if (secili == null) {
+                return;
+            }
+            DegisenDosya dd = (DegisenDosya) secili.getUserData();
+            String eski = GitHelper.getFileContentAtCommit(repoPath, dd.dosyaAdi(), "HEAD");
+            String yeni = GitHelper.getFileContentAtCommit(repoPath, dd.dosyaAdi(), "WORKING");
+            new DiffWindow(dd.dosyaAdi(), eski, yeni).show();
+        });
+
+        TextArea commitMesaji = new TextArea();
+        commitMesaji.setPromptText("Commit mesajı...");
+        commitMesaji.setPrefRowCount(3);
+
+        Button okBtn = new Button("OK");
+        okBtn.setOnAction(e -> {
+            if (commitMesaji.getText().isBlank()) {
+                Dialogs.error("Hata", "Commit mesajı gir.");
+                return;
+            }
+            boolean hicSecilenYok = dosyaListView.getItems().stream().noneMatch(CheckBox::isSelected);
+            if (hicSecilenYok) {
+                Dialogs.error("Hata", "Pushlanacak hiçbir dosya seçili değil.");
+                return;
+            }
+            if (!Dialogs.confirm("Emin Misiniz?", "Değişiklikleri pushlamak istediğinize emin misiniz?")) {
+                return;
+            }
+            for (CheckBox cb : dosyaListView.getItems()) {
+                DegisenDosya dd = (DegisenDosya) cb.getUserData();
+                if (cb.isSelected()) {
+                    GitHelper.gitAdd(repoPath, dd.dosyaAdi());
+                }
+            }
+            var commit = GitHelper.gitCommit(repoPath, commitMesaji.getText());
+            if (!commit.basarili() && !commit.stderr().isBlank()) {
+                Dialogs.error("Hata", "Commit başarısız: " + commit.stderr());
+                return;
+            }
+            var push = GitHelper.gitPush(repoPath);
+            if (push.basarili()) {
+                Toast.show(dlg, "Değişiklikler push edildi.", Toast.Tip.BASARI);
+                dlg.close();
+            } else {
+                Dialogs.error("Hata", "Push başarısız: " + push.stderr());
+            }
+        });
+
+        VBox root = new VBox(8, new Label("Değişiklikler (işaretli olanlar commit'e dahil edilir):"),
+                dosyaListView, farkiGorBtn, new Label("Commit Mesajı"), commitMesaji, okBtn);
+        root.setPadding(new Insets(12));
+        VBox.setVgrow(dosyaListView, Priority.ALWAYS);
+        dlg.setScene(new Scene(root, 520, 560));
+        dlg.showAndWait();
+    }
+}
